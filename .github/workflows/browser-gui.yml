@@ -1,0 +1,72 @@
+# Builds the serverless (Pyodide) version of af_analysis_gui, tests it in headless
+# Chromium, and publishes it to the gh-pages branch (GitHub Pages).
+name: Browser GUI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [browser-gui]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: browser-gui
+  cancel-in-progress: true
+
+jobs:
+  build-test-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: samuelmurail/pdb_cpp
+          path: pdb_cpp
+
+      - name: Build pdb_cpp WebAssembly wheel
+        uses: pypa/cibuildwheel@v3.2.1
+        with:
+          package-dir: pdb_cpp
+          output-dir: wheelhouse
+        env:
+          CIBW_PLATFORM: pyodide
+          CIBW_BUILD: cp312-pyodide_wasm32
+          # Must match PYODIDE_VERSION in browser/pyodide-worker.js
+          CIBW_PYODIDE_VERSION: "0.27.7"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build af_analysis wheel and the static site
+        run: |
+          pip install jinja2 playwright
+          pip wheel --no-deps . -w wheelhouse
+          python browser/build.py --wheels wheelhouse --out dist
+
+      - name: Smoke test in headless Chromium
+        run: |
+          python -m playwright install --with-deps chromium
+          (cd tests/inputs && zip -qr "$RUNNER_TEMP/af3.zip" fold_2024_07_01_12_14_prot_dna_zn)
+          python -m http.server 8000 -d dist >/dev/null 2>&1 &
+          sleep 2
+          python browser/smoke_test.py http://localhost:8000/ "$RUNNER_TEMP/af3.zip" screenshot.png
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-gui
+          path: |
+            screenshot.png
+            dist/
+
+      - name: Publish to gh-pages branch
+        run: |
+          cd dist
+          git init -q -b gh-pages
+          git add -A
+          git -c user.name="github-actions" -c user.email="github-actions@users.noreply.github.com" \
+            commit -qm "Deploy browser GUI from ${GITHUB_SHA}"
+          git push -qf "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" gh-pages
